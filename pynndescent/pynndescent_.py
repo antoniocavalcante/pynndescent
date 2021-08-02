@@ -63,6 +63,12 @@ FLOAT32_EPS = np.finfo(np.float32).eps
 
 EMPTY_GRAPH = make_heap(1, 1)
 
+RESIDUAL = (np.ndarray)
+
+def residual_info():
+    global RESIDUAL
+    return RESIDUAL
+
 
 @numba.njit(parallel=True)
 def generate_leaf_updates(leaf_block, dist_thresholds, data, dist):
@@ -260,6 +266,9 @@ def nn_descent_internal_low_memory_parallel(
     block_size = 16384
     n_blocks = n_vertices // block_size
 
+    RESIDUAL_N = current_graph[0]
+    RESIDUAL_D = current_graph[1]
+
     for n in range(n_iters):
         if verbose:
             print("\t", n + 1, " / ", n_iters)
@@ -280,11 +289,15 @@ def nn_descent_internal_low_memory_parallel(
             block_size,
         )
 
+        RESIDUAL_N = np.concatenate((RESIDUAL_N, current_graph[0]), axis=1)
+        RESIDUAL_D = np.concatenate((RESIDUAL_D, current_graph[1]), axis=1)
+
         if c <= delta * n_neighbors * data.shape[0]:
             if verbose:
                 print("\tStopping threshold met -- exiting after", n + 1, "iterations")
-            return
+            return (RESIDUAL_N, RESIDUAL_D)
 
+        return (RESIDUAL_N, RESIDUAL_D)
 
 @numba.njit()
 def nn_descent_internal_high_memory_parallel(
@@ -374,7 +387,7 @@ def nn_descent(
         raise ValueError("Invalid initial graph specified!")
 
     if low_memory:
-        nn_descent_internal_low_memory_parallel(
+        residual = nn_descent_internal_low_memory_parallel(
             current_graph,
             data,
             n_neighbors,
@@ -398,7 +411,7 @@ def nn_descent(
             verbose=verbose,
         )
 
-    return deheap_sort(current_graph)
+    return deheap_sort(current_graph), residual
 
 
 @numba.njit(parallel=True)
@@ -684,6 +697,7 @@ class NNDescent(object):
         n_jobs=None,
         compressed=True,
         verbose=False,
+        return_residual=False,
     ):
 
         if n_trees is None:
@@ -708,6 +722,8 @@ class NNDescent(object):
         self.n_jobs = n_jobs
         self.compressed = compressed
         self.verbose = verbose
+        self.return_residual = return_residual
+        self.residual = None
 
         data = check_array(data, dtype=np.float32, accept_sparse="csr", order="C")
         self._raw_data = data
@@ -904,7 +920,7 @@ class NNDescent(object):
             if verbose:
                 print(ts(), "NN descent for", str(n_iters), "iterations")
 
-            self._neighbor_graph = nn_descent(
+            self._neighbor_graph, self.residual = nn_descent(
                 self._raw_data,
                 self.n_neighbors,
                 self.rng_state,
@@ -927,6 +943,7 @@ class NNDescent(object):
             )
 
         numba.set_num_threads(self._original_num_threads)
+
 
     def __getstate__(self):
         if not hasattr(self, "_search_graph"):
