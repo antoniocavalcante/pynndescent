@@ -12,6 +12,7 @@ from pynndescent.optimal_transport import (
     network_simplex_core,
     total_cost,
     ProblemStatus,
+    sinkhorn_transport_plan,
 )
 
 _mock_identity = np.eye(2, dtype=np.float32)
@@ -50,6 +51,7 @@ def euclidean(x, y):
         "dim": numba.types.intp,
         "i": numba.types.uint16,
     },
+    cache=True,
 )
 def squared_euclidean(x, y):
     r"""Squared euclidean distance.
@@ -233,6 +235,7 @@ def jaccard(x, y):
         "dim": numba.types.intp,
         "i": numba.types.uint16,
     },
+    cache=True,
 )
 def alternative_jaccard(x, y):
     num_non_zero = 0.0
@@ -250,7 +253,7 @@ def alternative_jaccard(x, y):
         return -np.log2(num_equal / num_non_zero)
 
 
-@numba.vectorize(fastmath=True)
+@numba.vectorize(fastmath=True, cache=True)
 def correct_alternative_jaccard(v):
     return 1.0 - pow(2.0, -v)
 
@@ -418,6 +421,7 @@ def cosine(x, y):
         "dim": numba.types.intp,
         "i": numba.types.uint16,
     },
+    cache=True,
 )
 def alternative_cosine(x, y):
     result = 0.0
@@ -448,6 +452,7 @@ def alternative_cosine(x, y):
         "dim": numba.types.intp,
         "i": numba.types.uint16,
     },
+    cache=True,
 )
 def dot(x, y):
     result = 0.0
@@ -475,6 +480,7 @@ def dot(x, y):
         "dim": numba.types.intp,
         "i": numba.types.uint16,
     },
+    cache=True,
 )
 def alternative_dot(x, y):
     result = 0.0
@@ -488,12 +494,12 @@ def alternative_dot(x, y):
         return -np.log2(result)
 
 
-@numba.vectorize(fastmath=True)
+@numba.vectorize(fastmath=True, cache=True)
 def correct_alternative_cosine(d):
     return 1.0 - pow(2.0, -d)
 
 
-@numba.njit(fastmath=True)
+@numba.njit(fastmath=True, cache=True)
 def tsss(x, y):
     d_euc_squared = 0.0
     d_cos = 0.0
@@ -519,7 +525,7 @@ def tsss(x, y):
     return triangle * sector
 
 
-@numba.njit(fastmath=True)
+@numba.njit(fastmath=True, cache=True)
 def true_angular(x, y):
     result = 0.0
     norm_x = 0.0
@@ -541,7 +547,7 @@ def true_angular(x, y):
         return 1.0 - (np.arccos(result) / np.pi)
 
 
-@numba.vectorize(fastmath=True)
+@numba.vectorize(fastmath=True, cache=True)
 def true_angular_from_alt_cosine(d):
     return 1.0 - (np.arccos(pow(2.0, -d)) / np.pi)
 
@@ -592,6 +598,7 @@ def correlation(x, y):
         "dim": numba.types.intp,
         "i": numba.types.uint16,
     },
+    cache=True,
 )
 def hellinger(x, y):
     result = 0.0
@@ -628,6 +635,7 @@ def hellinger(x, y):
         "dim": numba.types.intp,
         "i": numba.types.uint16,
     },
+    cache=True,
 )
 def alternative_hellinger(x, y):
     result = 0.0
@@ -651,12 +659,12 @@ def alternative_hellinger(x, y):
         return np.log2(result)
 
 
-@numba.vectorize(fastmath=True)
+@numba.vectorize(fastmath=True, cache=True)
 def correct_alternative_hellinger(d):
     return np.sqrt(1.0 - pow(2.0, -d))
 
 
-@numba.njit()
+@numba.njit(cache=True)
 def rankdata(a, method="average"):
     arr = np.ravel(np.asarray(a))
     if method == "ordinal":
@@ -692,7 +700,7 @@ def rankdata(a, method="average"):
     return 0.5 * (count[dense] + count[dense - 1] + 1)
 
 
-@numba.njit(fastmath=True)
+@numba.njit(fastmath=True, cache=True)
 def spearmanr(x, y):
     a = np.column_stack((x, y))
 
@@ -705,7 +713,7 @@ def spearmanr(x, y):
     return rs[1, 0]
 
 
-@numba.njit(nogil=True)
+@numba.njit(nogil=True, cache=True)
 def kantorovich(x, y, cost=_dummy_cost, max_iter=100000):
 
     row_mask = x != 0
@@ -728,9 +736,7 @@ def kantorovich(x, y, cost=_dummy_cost, max_iter=100000):
     sub_cost = cost[row_mask, :][:, col_mask]
 
     node_arc_data, spanning_tree, graph = allocate_graph_structures(
-        a.shape[0],
-        b.shape[0],
-        False,
+        a.shape[0], b.shape[0], False
     )
     initialize_supply(a, -b, graph, node_arc_data.supply)
     initialize_cost(sub_cost, graph, node_arc_data.cost)
@@ -740,12 +746,7 @@ def kantorovich(x, y, cost=_dummy_cost, max_iter=100000):
         raise ValueError(
             "Kantorovich distance inputs must be valid probability distributions."
         )
-    solve_status = network_simplex_core(
-        node_arc_data,
-        spanning_tree,
-        graph,
-        max_iter,
-    )
+    solve_status = network_simplex_core(node_arc_data, spanning_tree, graph, max_iter)
     # if solve_status == ProblemStatus.MAX_ITER_REACHED:
     #     print("WARNING: RESULT MIGHT BE INACCURATE\nMax number of iteration reached!")
     if solve_status == ProblemStatus.INFEASIBLE:
@@ -757,6 +758,86 @@ def kantorovich(x, y, cost=_dummy_cost, max_iter=100000):
             "Optimal transport problem was UNBOUNDED. Please check " "inputs."
         )
     result = total_cost(node_arc_data.flow, node_arc_data.cost)
+
+    return result
+
+
+@numba.njit(fastmath=True, cache=True)
+def sinkhorn(x, y, cost=_dummy_cost, regularization=1.0):
+    row_mask = x != 0
+    col_mask = y != 0
+
+    a = x[row_mask].astype(np.float64)
+    b = y[col_mask].astype(np.float64)
+
+    a_sum = a.sum()
+    b_sum = b.sum()
+
+    a /= a_sum
+    b /= b_sum
+
+    sub_cost = cost[row_mask, :][:, col_mask]
+
+    transport_plan = sinkhorn_transport_plan(
+        x, y, cost=sub_cost, regularization=regularization
+    )
+    dim_i = transport_plan.shape[0]
+    dim_j = transport_plan.shape[1]
+    result = 0.0
+    for i in range(dim_i):
+        for j in range(dim_j):
+            result += transport_plan[i, j] * cost[i, j]
+
+    return result
+
+
+@numba.njit()
+def jensen_shannon_divergence(x, y):
+    result = 0.0
+    l1_norm_x = 0.0
+    l1_norm_y = 0.0
+    dim = x.shape[0]
+
+    for i in range(dim):
+        l1_norm_x += x[i]
+        l1_norm_y += y[i]
+
+    l1_norm_x += FLOAT32_EPS * dim
+    l1_norm_y += FLOAT32_EPS * dim
+
+    pdf_x = (x + FLOAT32_EPS) / l1_norm_x
+    pdf_y = (y + FLOAT32_EPS) / l1_norm_y
+    m = 0.5 * (pdf_x + pdf_y)
+
+    for i in range(dim):
+        result += 0.5 * (
+            pdf_x[i] * np.log(pdf_x[i] / m[i]) + pdf_y[i] * np.log(pdf_y[i] / m[i])
+        )
+
+    return result
+
+
+@numba.njit()
+def symmetric_kl_divergence(x, y):
+    result = 0.0
+    l1_norm_x = 0.0
+    l1_norm_y = 0.0
+    dim = x.shape[0]
+
+    for i in range(dim):
+        l1_norm_x += x[i]
+        l1_norm_y += y[i]
+
+    l1_norm_x += FLOAT32_EPS * dim
+    l1_norm_y += FLOAT32_EPS * dim
+
+    pdf_x = (x + FLOAT32_EPS) / l1_norm_x
+    pdf_y = (y + FLOAT32_EPS) / l1_norm_y
+
+    for i in range(dim):
+        result += pdf_x[i] * np.log(pdf_x[i] / pdf_y[i]) + pdf_y[i] * np.log(
+            pdf_y[i] / pdf_x[i]
+        )
 
     return result
 
@@ -785,14 +866,21 @@ named_distances = {
     "cosine": cosine,
     "dot": dot,
     "correlation": correlation,
-    "hellinger": hellinger,
     "haversine": haversine,
     "braycurtis": bray_curtis,
     "spearmanr": spearmanr,
-    "kantorovich": kantorovich,
-    "wasserstein": kantorovich,
     "tsss": tsss,
     "true_angular": true_angular,
+    # Distribution distances
+    "hellinger": hellinger,
+    "kantorovich": kantorovich,
+    "wasserstein": kantorovich,
+    "sinkhorn": sinkhorn,
+    "jensen-shannon": jensen_shannon_divergence,
+    "jensen_shannon": jensen_shannon_divergence,
+    "symmetric-kl": symmetric_kl_divergence,
+    "symmetric_kl": symmetric_kl_divergence,
+    "symmetric_kullback_liebler": symmetric_kl_divergence,
     # Binary distances
     "hamming": hamming,
     "jaccard": jaccard,
