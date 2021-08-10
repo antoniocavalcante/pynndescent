@@ -271,7 +271,7 @@ def nn_descent_internal_low_memory_parallel(
 
     for n in range(n_iters):
         if verbose:
-            print("\t", n + 1, " / ", n_iters)
+            print("[LOW] \t", n + 1, " / ", n_iters)
 
         (new_candidate_neighbors, old_candidate_neighbors) = new_build_candidates(
             current_graph,
@@ -288,7 +288,7 @@ def nn_descent_internal_low_memory_parallel(
             n_blocks,
             block_size,
         )
-
+        
         RESIDUAL_N = np.concatenate((RESIDUAL_N, current_graph[0]), axis=1)
         RESIDUAL_D = np.concatenate((RESIDUAL_D, current_graph[1]), axis=1)
 
@@ -297,7 +297,7 @@ def nn_descent_internal_low_memory_parallel(
                 print("\tStopping threshold met -- exiting after", n + 1, "iterations")
             return (RESIDUAL_N, RESIDUAL_D)
 
-        return (RESIDUAL_N, RESIDUAL_D)
+    return (RESIDUAL_N, RESIDUAL_D)
 
 @numba.njit()
 def nn_descent_internal_high_memory_parallel(
@@ -322,7 +322,7 @@ def nn_descent_internal_high_memory_parallel(
 
     for n in range(n_iters):
         if verbose:
-            print("\t", n + 1, " / ", n_iters)
+            print("[HIGH] \t", n + 1, " / ", n_iters)
 
         (new_candidate_neighbors, old_candidate_neighbors) = new_build_candidates(
             current_graph,
@@ -365,7 +365,7 @@ def nn_descent(
     n_iters=10,
     delta=0.001,
     init_graph=EMPTY_GRAPH,
-    rp_tree_init=True,
+    rp_tree_init=False,
     leaf_array=None,
     low_memory=True,
     verbose=False,
