@@ -237,7 +237,7 @@ def process_residual(
     n = len(RESIDUAL_N)
     m = len(RESIDUAL_N[0])
 
-    return [sorted(list(set([(RESIDUAL_D[i, j], RESIDUAL_N[i, j]) for j in range(n)])), key=lambda tup: tup[0] ) for i in range(m)]
+    return [sorted(list(set([(RESIDUAL_D[i, j], RESIDUAL_N[i, j]) for j in range(m)])), key=lambda tup: tup[0] ) for i in range(n)]
 
 
 @numba.njit()
