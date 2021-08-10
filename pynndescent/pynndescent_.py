@@ -285,9 +285,9 @@ def nn_descent_internal_low_memory_parallel(
         if c <= delta * n_neighbors * data.shape[0]:
             if verbose:
                 print("\tStopping threshold met -- exiting after", n + 1, "iterations")
-            return process_residual(RESIDUAL_N, RESIDUAL_D)
+            return RESIDUAL_N, RESIDUAL_D
 
-    return process_residual(RESIDUAL_N, RESIDUAL_D)
+    return RESIDUAL_N, RESIDUAL_D
 
 @numba.njit()
 def nn_descent_internal_high_memory_parallel(
@@ -372,7 +372,7 @@ def nn_descent(
         raise ValueError("Invalid initial graph specified!")
 
     if low_memory:
-        residual = nn_descent_internal_low_memory_parallel(
+        residual_n, residual_d = nn_descent_internal_low_memory_parallel(
             current_graph,
             data,
             n_neighbors,
@@ -396,7 +396,7 @@ def nn_descent(
             verbose=verbose,
         )
 
-    return deheap_sort(current_graph), residual
+    return deheap_sort(current_graph), residual_n, residual_d
 
 
 @numba.njit(parallel=True)
@@ -707,7 +707,8 @@ class NNDescent(object):
         self.compressed = compressed
         self.verbose = verbose
         self.return_residual = return_residual
-        self.residual = None
+        self.residual_d = None
+        self.residual_n = None
 
         data = check_array(data, dtype=np.float32, accept_sparse="csr", order="C")
         self._raw_data = data
@@ -898,7 +899,7 @@ class NNDescent(object):
             if verbose:
                 print(ts(), "NN descent for", str(n_iters), "iterations")
 
-            self._neighbor_graph, self.residual = nn_descent(
+            self._neighbor_graph, self.residual_n, self.residual_d = nn_descent(
                 self._raw_data,
                 self.n_neighbors,
                 self.rng_state,
@@ -1686,6 +1687,13 @@ class NNDescent(object):
                 leaf_array=np.array([[-1], [-1]]),
                 verbose=self.verbose,
             )
+
+    @property
+    def residual(self):
+        if self._distance_correction is not None:
+            self.residual_d = self._distance_correction(self.residual_d)
+
+        return process_residual(self.residual_n, self.residual_d)
 
 
 class PyNNDescentTransformer(BaseEstimator, TransformerMixin):
