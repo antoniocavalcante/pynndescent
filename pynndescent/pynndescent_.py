@@ -230,6 +230,17 @@ def process_candidates(
 
 
 @numba.njit()
+def process_residual(
+    RESIDUAL_N,
+    RESIDUAL_D,
+):
+    n = len(RESIDUAL_N)
+    m = len(RESIDUAL_N[0])
+
+    return [sorted(list(set([(RESIDUAL_D[i, j], RESIDUAL_N[i, j]) for j in range(n)])), key=lambda tup: tup[0] ) for i in range(m)]
+
+
+@numba.njit()
 def nn_descent_internal_low_memory_parallel(
     current_graph,
     data,
@@ -274,9 +285,9 @@ def nn_descent_internal_low_memory_parallel(
         if c <= delta * n_neighbors * data.shape[0]:
             if verbose:
                 print("\tStopping threshold met -- exiting after", n + 1, "iterations")
-            return (RESIDUAL_N, RESIDUAL_D)
+            return process_residual(RESIDUAL_N, RESIDUAL_D)
 
-    return (RESIDUAL_N, RESIDUAL_D)
+    return process_residual(RESIDUAL_N, RESIDUAL_D)
 
 @numba.njit()
 def nn_descent_internal_high_memory_parallel(
