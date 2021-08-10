@@ -31,6 +31,9 @@ import numba
 from collections import namedtuple
 from enum import Enum, IntEnum
 
+_mock_identity = np.eye(2, dtype=np.float32)
+_mock_ones = np.ones(2, dtype=np.float32)
+_dummy_cost = np.zeros((2, 2), dtype=np.float64)
 
 # Accuracy tolerance and net supply tolerance
 EPSILON = 2.2204460492503131e-15
@@ -223,14 +226,9 @@ def find_join_node(source, target, succ_num, parent, in_arc):
         "second": numba.uint16,
         "result": numba.uint8,
         "in_arc": numba.uint32,
-    },
+    }
 )
-def find_leaving_arc(
-    join,
-    in_arc,
-    node_arc_data,
-    spanning_tree,
-):
+def find_leaving_arc(join, in_arc, node_arc_data, spanning_tree):
     source = node_arc_data.source
     target = node_arc_data.target
     flow = node_arc_data.flow
@@ -299,20 +297,8 @@ def find_leaving_arc(
 # Change _flow and _state vectors
 # locals: val, u
 # modifies: _state, _flow
-@numba.njit(
-    locals={
-        "u": numba.uint16,
-        "in_arc": numba.uint32,
-        "val": numba.float64,
-    },
-)
-def update_flow(
-    join,
-    leaving_arc_data,
-    node_arc_data,
-    spanning_tree,
-    in_arc,
-):
+@numba.njit(locals={"u": numba.uint16, "in_arc": numba.uint32, "val": numba.float64})
+def update_flow(join, leaving_arc_data, node_arc_data, spanning_tree, in_arc):
     source = node_arc_data.source
     target = node_arc_data.target
     flow = node_arc_data.flow
@@ -372,15 +358,9 @@ def update_flow(
         "new_stem": numba.uint16,
         "par_stem": numba.uint16,
         "in_arc": numba.uint32,
-    },
+    }
 )
-def update_spanning_tree(
-    spanning_tree,
-    leaving_arc_data,
-    join,
-    in_arc,
-    source,
-):
+def update_spanning_tree(spanning_tree, leaving_arc_data, join, in_arc, source):
 
     parent = spanning_tree.parent
     thread = spanning_tree.thread
@@ -863,12 +843,7 @@ def total_cost(flow, cost):
 
 
 @numba.njit(nogil=True)
-def network_simplex_core(
-    node_arc_data,
-    spanning_tree,
-    graph,
-    max_iter,
-):
+def network_simplex_core(node_arc_data, spanning_tree, graph, max_iter):
 
     # pivot_block = PivotBlock(
     #     max(np.int32(np.sqrt(graph.n_arcs)), 10),
@@ -949,3 +924,271 @@ def network_simplex_core(
             pi[i] -= max_pot
 
     return solution_status
+
+
+#######################################################
+# SINKHORN distances in various variations
+#######################################################
+
+
+@numba.njit(
+    fastmath=True,
+    parallel=True,
+    locals={"diff": numba.float32, "result": numba.float32},
+    cache=True,
+)
+def right_marginal_error(u, K, v, y):
+    uK = u @ K
+    result = 0.0
+    for i in numba.prange(uK.shape[0]):
+        diff = y[i] - uK[i] * v[i]
+        result += diff * diff
+    return np.sqrt(result)
+
+
+@numba.njit(
+    fastmath=True,
+    parallel=True,
+    locals={"diff": numba.float32, "result": numba.float32},
+    cache=True,
+)
+def right_marginal_error_batch(u, K, v, y):
+    uK = K.T @ u
+    result = 0.0
+    for i in numba.prange(uK.shape[0]):
+        for j in range(uK.shape[1]):
+            diff = y[j, i] - uK[i, j] * v[i, j]
+            result += diff * diff
+    return np.sqrt(result)
+
+
+@numba.njit(fastmath=True, parallel=True, cache=True)
+def transport_plan(K, u, v):
+    i_dim = K.shape[0]
+    j_dim = K.shape[1]
+    result = np.empty_like(K)
+    for i in numba.prange(i_dim):
+        for j in range(j_dim):
+            result[i, j] = u[i] * K[i, j] * v[j]
+
+    return result
+
+
+@numba.njit(fastmath=True, parallel=True, locals={"result": numba.float32}, cache=True)
+def relative_change_in_plan(old_u, old_v, new_u, new_v):
+    i_dim = old_u.shape[0]
+    j_dim = old_v.shape[0]
+    result = 0.0
+    for i in numba.prange(i_dim):
+        for j in range(j_dim):
+            old_uv = old_u[i] * old_v[j]
+            result += np.float32(np.abs(old_uv - new_u[i] * new_v[j]) / old_uv)
+
+    return result / (i_dim * j_dim)
+
+
+@numba.njit(fastmath=True, parallel=True, cache=True)
+def precompute_K_prime(K, x):
+    i_dim = K.shape[0]
+    j_dim = K.shape[1]
+    result = np.empty_like(K)
+    for i in numba.prange(i_dim):
+        if x[i] > 0.0:
+            x_i_inverse = 1.0 / x[i]
+        else:
+            x_i_inverse = INFINITY
+        for j in range(j_dim):
+            result[i, j] = x_i_inverse * K[i, j]
+
+    return result
+
+
+@numba.njit(fastmath=True, parallel=True, cache=True)
+def K_from_cost(cost, regularization):
+    i_dim = cost.shape[0]
+    j_dim = cost.shape[1]
+    result = np.empty_like(cost)
+    for i in numba.prange(i_dim):
+        for j in range(j_dim):
+            scaled_cost = cost[i, j] / regularization
+            result[i, j] = np.exp(-scaled_cost)
+
+    return result
+
+
+@numba.njit(fastmath=True, cache=True)
+def sinkhorn_iterations(
+    x, y, u, v, K, max_iter=1000, error_tolerance=1e-9, change_tolerance=1e-9
+):
+    K_prime = precompute_K_prime(K, x)
+
+    prev_u = u
+    prev_v = v
+
+    for iteration in range(max_iter):
+
+        next_v = y / (K.T @ u)
+
+        if np.any(~np.isfinite(next_v)):
+            break
+
+        next_u = 1.0 / (K_prime @ next_v)
+
+        if np.any(~np.isfinite(next_u)):
+            break
+
+        u = next_u
+        v = next_v
+
+        if iteration % 20 == 0:
+            # Check if values in plan have changed significantly since last 20 iterations
+            relative_change = relative_change_in_plan(prev_u, prev_v, next_u, next_v)
+            if relative_change <= change_tolerance:
+                break
+
+            prev_u = u
+            prev_v = v
+
+        if iteration % 10 == 0:
+            # Check if right marginal error is less than tolerance every 10 iterations
+            err = right_marginal_error(u, K, v, y)
+            if err <= error_tolerance:
+                break
+
+    return u, v
+
+
+@numba.njit(fastmath=True, cache=True)
+def sinkhorn_iterations_batch(x, y, u, v, K, max_iter=1000, error_tolerance=1e-9):
+    K_prime = precompute_K_prime(K, x)
+
+    for iteration in range(max_iter):
+
+        next_v = y.T / (K.T @ u)
+
+        if np.any(~np.isfinite(next_v)):
+            break
+
+        next_u = 1.0 / (K_prime @ next_v)
+
+        if np.any(~np.isfinite(next_u)):
+            break
+
+        u = next_u
+        v = next_v
+
+        if iteration % 10 == 0:
+            # Check if right marginal error is less than tolerance every 10 iterations
+            err = right_marginal_error_batch(u, K, v, y)
+            if err <= error_tolerance:
+                break
+
+    return u, v
+
+
+@numba.njit(fastmath=True, cache=True)
+def sinkhorn_transport_plan(
+    x,
+    y,
+    cost=_dummy_cost,
+    regularization=1.0,
+    max_iter=1000,
+    error_tolerance=1e-9,
+    change_tolerance=1e-9,
+):
+    dim_x = x.shape[0]
+    dim_y = y.shape[0]
+    u = np.full(dim_x, 1.0 / dim_x, dtype=cost.dtype)
+    v = np.full(dim_y, 1.0 / dim_y, dtype=cost.dtype)
+
+    K = K_from_cost(cost, regularization)
+    u, v = sinkhorn_iterations(
+        x,
+        y,
+        u,
+        v,
+        K,
+        max_iter=max_iter,
+        error_tolerance=error_tolerance,
+        change_tolerance=change_tolerance,
+    )
+
+    return transport_plan(K, u, v)
+
+
+@numba.njit(fastmath=True, cache=True)
+def sinkhorn_distance(x, y, cost=_dummy_cost, regularization=1.0):
+    transport_plan = sinkhorn_transport_plan(
+        x, y, cost=cost, regularization=regularization
+    )
+    dim_i = transport_plan.shape[0]
+    dim_j = transport_plan.shape[1]
+    result = 0.0
+    for i in range(dim_i):
+        for j in range(dim_j):
+            result += transport_plan[i, j] * cost[i, j]
+
+    return result
+
+
+@numba.njit(fastmath=True, parallel=True, cache=True)
+def sinkhorn_distance_batch(x, y, cost=_dummy_cost, regularization=1.0):
+    dim_x = x.shape[0]
+    dim_y = y.shape[0]
+
+    batch_size = y.shape[1]
+
+    u = np.full((dim_x, batch_size), 1.0 / dim_x, dtype=cost.dtype)
+    v = np.full((dim_y, batch_size), 1.0 / dim_y, dtype=cost.dtype)
+
+    K = K_from_cost(cost, regularization)
+    u, v = sinkhorn_iterations_batch(
+        x,
+        y,
+        u,
+        v,
+        K,
+    )
+
+    i_dim = K.shape[0]
+    j_dim = K.shape[1]
+    result = np.zeros(batch_size)
+    for i in range(i_dim):
+        for j in range(j_dim):
+            K_times_cost = K[i, j] * cost[i, j]
+            for batch in range(batch_size):
+                result[batch] += u[i, batch] * K_times_cost * v[j, batch]
+
+    return result
+
+
+def make_fixed_cost_sinkhorn_distance(cost, regularization=1.0):
+
+    K = K_from_cost(cost, regularization)
+    dim_x = K.shape[0]
+    dim_y = K.shape[1]
+
+    @numba.njit(fastmath=True)
+    def closure(x, y):
+        u = np.full(dim_x, 1.0 / dim_x, dtype=cost.dtype)
+        v = np.full(dim_y, 1.0 / dim_y, dtype=cost.dtype)
+
+        K = K_from_cost(cost, regularization)
+        u, v = sinkhorn_iterations(
+            x,
+            y,
+            u,
+            v,
+            K,
+        )
+
+        current_plan = transport_plan(K, u, v)
+
+        result = 0.0
+        for i in range(dim_x):
+            for j in range(dim_y):
+                result += current_plan[i, j] * cost[i, j]
+
+        return result
+
+    return closure
